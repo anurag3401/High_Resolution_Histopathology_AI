@@ -129,7 +129,7 @@ st.markdown(
 
 MODEL_PATH = (
     r"C:\\Users\\Anurag Prasad\\Desktop\\High_Resolution_Histopathology_AI"
-    r"\histology_model.pth"
+    r"\\histology_model.pth"
 )
 
 PATCH_SIZE = 224
