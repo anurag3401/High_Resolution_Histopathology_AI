@@ -690,6 +690,33 @@ This project has several limitations:
 
 ---
 
+## 🧠 Advanced Model Analysis
+
+The Streamlit dashboard now includes a dedicated **Model Evaluation Center** using the stored `test_results.csv` evaluation outputs. It provides:
+
+* ROC curve and ROC-AUC
+* Precision-Recall curve and Average Precision
+* Interactive decision-threshold analysis
+* Sensitivity/recall and specificity
+* Precision and F1-score at the selected threshold
+* Confusion matrix at the selected threshold
+* Confidence calibration curve
+* Threshold-vs-metric trade-off visualization
+* Downloadable threshold-analysis CSV
+* Model architecture metadata and parameter count
+
+### Threshold Analysis
+
+Instead of treating 0.50 as the only possible decision boundary, the dashboard evaluates thresholds from 0.05 to 0.95 and identifies the threshold producing the highest F1-score on the stored test results. This is intended for model analysis and should not be interpreted as clinical threshold validation.
+
+### Explainability
+
+The dashboard also provides **Grad-CAM** visualization for the ResNet18 prediction and a patch-coordinate map. These visualizations help inspect what regions influenced the model, but they do not constitute ground-truth tumor localization.
+
+### 🗂️ Batch Inference
+
+Multiple uploaded images can be screened in one session. The dashboard reports image dimensions, prediction, confidence, benign probability, malignant probability, and provides a downloadable CSV summary.
+
 ## 🔮 Future Improvements
 
 Possible future improvements include:
@@ -700,10 +727,11 @@ Possible future improvements include:
 * Using transfer learning with pretrained weights.
 * Testing EfficientNet, DenseNet, or Vision Transformer models.
 * Using overlapping patches for better heatmap coverage.
-* Adding Grad-CAM or Grad-CAM++ visualization.
-* Adding model calibration.
-* Adding ROC-AUC and precision-recall curves.
-* Adding batch image upload.
+* Comparing independently trained architectures such as EfficientNet, DenseNet, and Vision Transformers.
+* Patient-level splitting and external validation to reduce data-leakage risk.
+* Temperature scaling or other calibration methods on a validation set.
+* Prospective threshold selection on a validation set rather than the test set.
+* Pathologist-reviewed region annotations for quantitative localization evaluation.
 * Adding user authentication.
 * Deploying the application online.
 * Improving the dashboard design.
