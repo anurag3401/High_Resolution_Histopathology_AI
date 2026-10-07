@@ -127,10 +127,9 @@ st.markdown(
 # PATHS AND SETTINGS
 # ============================================================
 
-MODEL_PATH = (
-    r"C:\\Users\\Anurag Prasad\\Desktop\\High_Resolution_Histopathology_AI"
-    r"\\histology_model.pth"
-)
+# Use a path relative to this app so it works both locally and on Streamlit Cloud.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "histology_model.pth")
 
 PATCH_SIZE = 224
 STRIDE = 224
