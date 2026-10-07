@@ -745,6 +745,10 @@ uploaded_file = uploaded_files[0]
 image = Image.open(uploaded_file).convert("RGB")
 width, height = image.size
 
+# Calculate image-quality indicators before they are displayed below.
+# Keep this after the upload is available so the variable exists on every rerun.
+quality = calculate_image_quality(image)
+
 
 # ============================================================
 # IMAGE PARAMETERS
