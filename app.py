@@ -233,6 +233,110 @@ def analyze_patches(
     return records, heatmap, elapsed
 
 
+
+def calculate_image_quality(image):
+    arr = np.asarray(image).astype(np.float32)
+    gray = arr.mean(axis=2)
+    brightness = float(gray.mean())
+    contrast = float(gray.std())
+    gx = np.diff(gray, axis=1)
+    gy = np.diff(gray, axis=0)
+    sharpness = float(np.mean(gx * gx) + np.mean(gy * gy))
+    background_fraction = float(np.mean(np.all(arr > 235, axis=2)))
+    return {
+        "brightness": brightness,
+        "contrast": contrast,
+        "sharpness_proxy": sharpness,
+        "background_fraction": background_fraction,
+        "tissue_fraction": 1.0 - background_fraction
+    }
+
+
+def probability_entropy(probabilities):
+    p = np.clip(np.asarray(probabilities, dtype=np.float64), 1e-12, 1.0)
+    entropy = -np.sum(p * np.log2(p))
+    maximum = np.log2(len(p))
+    return float(entropy / maximum) if maximum > 0 else 0.0
+
+
+def make_patch_location_map(image, records):
+    fig, ax = plt.subplots(figsize=(10, 6.5))
+    ax.imshow(image)
+    for record in records:
+        p = record["malignant_probability"]
+        rect = plt.Rectangle(
+            (record["x"], record["y"]),
+            record["width"],
+            record["height"],
+            fill=False,
+            linewidth=1.5,
+            edgecolor=plt.cm.jet(p)
+        )
+        ax.add_patch(rect)
+    ax.axis("off")
+    ax.set_title(
+        "Patch Coordinate Map — color = malignant probability",
+        fontsize=13,
+        fontweight="bold"
+    )
+    fig.tight_layout()
+    return fig
+
+
+def make_gradcam(image, model, class_names, device):
+    target_layer = model.layer4[-1].conv2
+    activations = []
+    gradients = []
+
+    def forward_hook(module, inp, output):
+        activations.append(output)
+
+    def backward_hook(module, grad_input, grad_output):
+        gradients.append(grad_output[0])
+
+    h1 = target_layer.register_forward_hook(forward_hook)
+    h2 = target_layer.register_full_backward_hook(backward_hook)
+
+    try:
+        tensor = transform(image).unsqueeze(0).to(device)
+        model.zero_grad(set_to_none=True)
+        output = model(tensor)
+        probabilities = torch.softmax(output, dim=1)
+        target_index = int(torch.argmax(output, dim=1).item())
+        output[0, target_index].backward()
+
+        activation = activations[-1]
+        gradient = gradients[-1]
+        weights = gradient.mean(dim=(2, 3), keepdim=True)
+        cam = torch.relu((weights * activation).sum(dim=1)).squeeze(0)
+        cam = cam.detach().cpu().numpy()
+        cam -= cam.min()
+        if cam.max() > 0:
+            cam /= cam.max()
+
+        cam_image = Image.fromarray(np.uint8(cam * 255)).resize(
+            image.size, Image.Resampling.BILINEAR
+        )
+        cam_array = np.asarray(cam_image).astype(np.float32) / 255.0
+
+        fig, ax = plt.subplots(figsize=(10, 6.5))
+        ax.imshow(image)
+        overlay = ax.imshow(cam_array, cmap="jet", alpha=0.48, vmin=0, vmax=1)
+        ax.axis("off")
+        ax.set_title(
+            f"Grad-CAM — model attention for {class_names[target_index].upper()}",
+            fontsize=14,
+            fontweight="bold"
+        )
+        colorbar = fig.colorbar(overlay, ax=ax, fraction=0.046, pad=0.04)
+        colorbar.set_label("Relative activation")
+        fig.tight_layout()
+
+        return fig, class_names[target_index], probabilities[0].detach().cpu().numpy()
+    finally:
+        h1.remove()
+        h2.remove()
+
 def make_heatmap_figure(image, heatmap):
     fig, ax = plt.subplots(figsize=(10, 6.5))
     ax.imshow(image)
@@ -426,15 +530,50 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-uploaded_file = st.file_uploader(
-    "Choose a PNG, JPG, JPEG, BMP, TIF or TIFF image",
-    type=["png", "jpg", "jpeg", "bmp", "tif", "tiff"]
+uploaded_files = st.file_uploader(
+    "Choose one or more PNG, JPG, JPEG, BMP, TIF or TIFF images",
+    type=["png", "jpg", "jpeg", "bmp", "tif", "tiff"],
+    accept_multiple_files=True
 )
 
-if uploaded_file is None:
-    st.info("Upload an image to start the full patch-level analysis.")
+if not uploaded_files:
+    st.info("Upload one image for detailed analysis, or multiple images for batch screening.")
     st.stop()
 
+if len(uploaded_files) > 1:
+    st.markdown('<div class="section-title">🗂️ Batch Screening</div>', unsafe_allow_html=True)
+    batch_rows = []
+    batch_start = time.perf_counter()
+
+    with st.spinner(f"Screening {len(uploaded_files)} images..."):
+        for batch_file in uploaded_files:
+            batch_image = Image.open(batch_file).convert("RGB")
+            batch_pred, batch_conf, batch_probs = predict_image(
+                batch_image, model, class_names, device
+            )
+            batch_rows.append({
+                "filename": batch_file.name,
+                "width": batch_image.width,
+                "height": batch_image.height,
+                "prediction": batch_pred,
+                "confidence_%": round(batch_conf * 100, 2),
+                "benign_probability_%": round(batch_probs.get("benign", 0) * 100, 2),
+                "malignant_probability_%": round(batch_probs.get("malignant", 0) * 100, 2)
+            })
+
+    batch_df = pd.DataFrame(batch_rows)
+    st.dataframe(batch_df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "⬇️ Download Batch Screening CSV",
+        data=batch_df.to_csv(index=False).encode("utf-8"),
+        file_name="batch_screening_results.csv",
+        mime="text/csv"
+    )
+    st.caption(f"Batch screening time: {time.perf_counter() - batch_start:.3f} s")
+    st.divider()
+    st.info("Detailed patch analysis below uses the first uploaded image.")
+
+uploaded_file = uploaded_files[0]
 image = Image.open(uploaded_file).convert("RGB")
 width, height = image.size
 
@@ -529,6 +668,18 @@ with p2:
     st.metric("Malignant probability", f"{probability_dict.get('malignant', 0) * 100:.2f}%")
 with p3:
     st.metric("Image inference time", f"{image_time:.3f} s")
+
+st.subheader("🧪 Image Quality Indicators")
+q1, q2, q3, q4 = st.columns(4)
+with q1:
+    st.metric("Brightness", f"{quality['brightness']:.1f}")
+with q2:
+    st.metric("Contrast", f"{quality['contrast']:.1f}")
+with q3:
+    st.metric("Sharpness proxy", f"{quality['sharpness_proxy']:.1f}")
+with q4:
+    st.metric("Estimated tissue coverage", f"{quality['tissue_fraction'] * 100:.1f}%")
+st.caption("These are image-quality indicators, not clinical measurements.")
 
 
 # ============================================================
@@ -731,6 +882,51 @@ if show_all_patches:
     with st.expander("View compact patch contact sheet"):
         contact_sheet = make_patch_contact_sheet(gallery_records, columns=4)
         st.image(contact_sheet, use_container_width=True)
+
+
+# ============================================================
+# EXPLAINABILITY
+# ============================================================
+
+st.markdown(
+    '<div class="section-title">🔍 Model Explainability</div>',
+    unsafe_allow_html=True
+)
+
+with st.expander("Show Grad-CAM attention map"):
+    st.caption("Grad-CAM highlights regions that contributed most strongly to the selected ResNet18 class.")
+    if st.button("Generate Grad-CAM", key="gradcam_button"):
+        with st.spinner("Computing Grad-CAM..."):
+            gradcam_fig, gradcam_class, gradcam_probs = make_gradcam(
+                image, model, class_names, device
+            )
+        st.pyplot(gradcam_fig, use_container_width=True)
+        st.write(f"Grad-CAM target class: **{gradcam_class.upper()}**")
+
+
+with st.expander("Show patch coordinate map"):
+    st.caption("Each rectangle is one extracted patch. Color represents malignant probability.")
+    coordinate_fig = make_patch_location_map(image, records)
+    st.pyplot(coordinate_fig, use_container_width=True)
+
+
+patch_df["uncertainty"] = patch_df.apply(
+    lambda row: probability_entropy([
+        row["malignant_probability"],
+        1.0 - row["malignant_probability"]
+    ]),
+    axis=1
+)
+
+uncertain_patch = patch_df.loc[patch_df["uncertainty"].idxmax()]
+
+u1, u2, u3 = st.columns(3)
+with u1:
+    st.metric("Mean patch uncertainty", f"{patch_df['uncertainty'].mean() * 100:.1f}%")
+with u2:
+    st.metric("Most uncertain patch", f"#{int(uncertain_patch['patch_number'])}")
+with u3:
+    st.metric("Uncertain patch P(malignant)", f"{uncertain_patch['malignant_probability'] * 100:.1f}%")
 
 
 # ============================================================
