@@ -129,6 +129,96 @@ transform = transforms.Compose([
 ])
 
 
+
+@st.cache_data
+def load_test_results():
+    path = os.path.join(BASE_DIR, "test_results.csv")
+    if not os.path.exists(path):
+        return None
+    df = pd.read_csv(path)
+    required = {"actual_label", "predicted_label", "confidence"}
+    if not required.issubset(df.columns):
+        return None
+    df["actual_binary"] = df["actual_label"].str.lower().eq("malignant").astype(int)
+    df["predicted_binary"] = df["predicted_label"].str.lower().eq("malignant").astype(int)
+    df["malignant_probability"] = np.where(
+        df["predicted_binary"].eq(1), df["confidence"].astype(float),
+        1.0 - df["confidence"].astype(float)
+    )
+    return df
+
+
+def evaluation_metrics(df, threshold=0.5):
+    y = df["actual_binary"].to_numpy()
+    p = df["malignant_probability"].to_numpy()
+    pred = (p >= threshold).astype(int)
+    tn = int(((y == 0) & (pred == 0)).sum())
+    fp = int(((y == 0) & (pred == 1)).sum())
+    fn = int(((y == 1) & (pred == 0)).sum())
+    tp = int(((y == 1) & (pred == 1)).sum())
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    specificity = tn / max(tn + fp, 1)
+    accuracy = (tp + tn) / max(len(y), 1)
+    f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+    return dict(accuracy=accuracy, precision=precision, recall=recall,
+                specificity=specificity, f1=f1, tn=tn, fp=fp, fn=fn, tp=tp)
+
+
+def threshold_analysis(df):
+    rows = []
+    for t in np.linspace(0.05, 0.95, 91):
+        m = evaluation_metrics(df, float(t))
+        rows.append({"threshold": t, "accuracy": m["accuracy"],
+                     "precision": m["precision"], "recall": m["recall"],
+                     "specificity": m["specificity"], "f1": m["f1"]})
+    return pd.DataFrame(rows)
+
+
+def make_roc_plot(df):
+    from sklearn.metrics import roc_curve, roc_auc_score
+    y, p = df["actual_binary"], df["malignant_probability"]
+    fpr, tpr, _ = roc_curve(y, p)
+    auc = roc_auc_score(y, p)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(fpr, tpr, label=f"ResNet18 AUC = {auc:.3f}")
+    ax.plot([0, 1], [0, 1], linestyle="--")
+    ax.set(xlabel="False Positive Rate", ylabel="True Positive Rate", title="ROC Curve")
+    ax.legend()
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    return fig, auc
+
+
+def make_pr_plot(df):
+    from sklearn.metrics import precision_recall_curve, average_precision_score
+    y, p = df["actual_binary"], df["malignant_probability"]
+    precision, recall, _ = precision_recall_curve(y, p)
+    ap = average_precision_score(y, p)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(recall, precision, label=f"Average Precision = {ap:.3f}")
+    ax.set(xlabel="Recall", ylabel="Precision", title="Precision-Recall Curve")
+    ax.legend()
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    return fig
+
+
+def make_calibration_plot(df):
+    from sklearn.calibration import calibration_curve
+    y, p = df["actual_binary"], df["malignant_probability"]
+    frac, mean = calibration_curve(y, p, n_bins=10, strategy="uniform")
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(mean, frac, marker="o", label="ResNet18")
+    ax.plot([0, 1], [0, 1], linestyle="--", label="Perfect calibration")
+    ax.set(xlabel="Mean predicted probability",
+           ylabel="Observed malignant frequency",
+           title="Confidence Calibration")
+    ax.legend()
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    return fig
+
 # ============================================================
 # PREDICTION HELPERS
 # ============================================================
@@ -519,6 +609,84 @@ except Exception as error:
     st.error("Error while loading the model.")
     st.exception(error)
     st.stop()
+
+
+
+# ============================================================
+# MODEL EVALUATION CENTER
+# ============================================================
+
+eval_df = load_test_results()
+
+with st.expander("📊 Model Evaluation Center"):
+    if eval_df is None:
+        st.info("test_results.csv is not available.")
+    else:
+        from sklearn.metrics import roc_auc_score
+
+        base = evaluation_metrics(eval_df, 0.50)
+        table = threshold_analysis(eval_df)
+        best = table.loc[table["f1"].idxmax()]
+        auc = roc_auc_score(eval_df["actual_binary"], eval_df["malignant_probability"])
+
+        st.caption("Evaluation uses the committed test_results.csv. Metrics are for research/model analysis.")
+
+        a1, a2, a3, a4, a5 = st.columns(5)
+        a1.metric("Test images", len(eval_df))
+        a2.metric("Accuracy", f"{base['accuracy'] * 100:.2f}%")
+        a3.metric("F1-score", f"{base['f1']:.3f}")
+        a4.metric("ROC-AUC", f"{auc:.3f}")
+        a5.metric("Best F1 threshold", f"{best['threshold']:.2f}")
+
+        threshold = st.slider("Decision threshold", 0.05, 0.95, 0.50, 0.05, key="eval_threshold")
+        m = evaluation_metrics(eval_df, threshold)
+
+        cm = pd.DataFrame(
+            [[m["tn"], m["fp"]], [m["fn"], m["tp"]]],
+            index=["Actual Benign", "Actual Malignant"],
+            columns=["Predicted Benign", "Predicted Malignant"]
+        )
+        st.subheader("Confusion Matrix")
+        st.dataframe(cm, use_container_width=True)
+
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Sensitivity / Recall", f"{m['recall'] * 100:.2f}%")
+        b2.metric("Specificity", f"{m['specificity'] * 100:.2f}%")
+        b3.metric("Precision", f"{m['precision'] * 100:.2f}%")
+        b4.metric("F1", f"{m['f1']:.3f}")
+
+        left, right = st.columns(2)
+        with left:
+            roc_fig, _ = make_roc_plot(eval_df)
+            st.pyplot(roc_fig, use_container_width=True)
+        with right:
+            st.pyplot(make_pr_plot(eval_df), use_container_width=True)
+
+        st.subheader("Calibration")
+        st.pyplot(make_calibration_plot(eval_df), use_container_width=True)
+
+        st.subheader("Threshold Trade-off")
+        st.line_chart(table.set_index("threshold")[["f1", "recall", "specificity", "accuracy"]])
+
+        st.download_button(
+            "⬇️ Download Threshold Analysis",
+            table.to_csv(index=False).encode("utf-8"),
+            "threshold_analysis.csv",
+            "text/csv",
+            key="threshold_download"
+        )
+
+        st.subheader("Model Metadata")
+        model_info = pd.DataFrame([{
+            "Architecture": "ResNet18",
+            "Task": "Benign vs Malignant",
+            "Input": "224 × 224",
+            "Classes": ", ".join(class_names),
+            "Parameters": sum(p.numel() for p in model.parameters()),
+            "Device": str(device),
+            "Checkpoint": "histology_model.pth"
+        }])
+        st.dataframe(model_info, use_container_width=True, hide_index=True)
 
 
 # ============================================================
